@@ -14,7 +14,8 @@ Exit codes: 0 = updated, 0 + "no-op" = AMFI file had nothing new (weekend,
 holiday), 1 = hard failure (the workflow turns that into a visible red run).
 """
 import gzip, json, os, subprocess, sys, tempfile, time
-from datetime import datetime, timezone
+from collections import Counter
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import urllib.request
 
@@ -83,7 +84,24 @@ def main():
               f"{len(schemes)} schemes (weekend/holiday?)")
         return
 
-    blob["as_of"] = max(s[-1][0] for s in schemes.values() if s)
+    # as_of feeds the site's "NAVs updated:" label, so it must be the date the
+    # universe is genuinely current to — not a plain max(). AMFI forward-dates
+    # overnight/liquid NAVs (Friday's file carried Sat+Sun rows for 18 of
+    # 3,577 schemes, stamping the old max() "2026-08-02"). Rule: the newest
+    # non-future (IST) date that at least 1% of schemes have reached. The
+    # forward-dated rows themselves stay in the store and serve fine.
+    today_ist = datetime.now(timezone.utc).astimezone(
+        timezone(timedelta(hours=5, minutes=30))).date().isoformat()
+    tally = Counter(s[-1][0] for s in schemes.values() if s)
+    eligible = sorted((d for d in tally if d <= today_ist), reverse=True)
+    threshold = max(1, len(schemes) // 100)
+    as_of, cum = eligible[-1] if eligible else max(tally), 0
+    for d in eligible:
+        cum += tally[d]
+        if cum >= threshold:
+            as_of = d
+            break
+    blob["as_of"] = as_of
     blob["built_utc"] = datetime.now(timezone.utc).isoformat()
     with gzip.open(work / STORE, "wt", encoding="utf-8") as f:
         json.dump(blob, f, separators=(",", ":"))
