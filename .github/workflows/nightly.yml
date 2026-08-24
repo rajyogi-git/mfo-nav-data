@@ -17,6 +17,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # The parser is the single point of failure for this pipeline, and it
+      # failed silently for five days in Aug 2026. Two seconds of tests before
+      # each run is cheap insurance against shipping that twice.
+      - name: Parser tests
+        run: |
+          pip install --quiet pytest
+          python -m pytest tests/ -q
+
       - name: Append today's NAVs from AMFI
         env:
           GH_TOKEN: ${{ github.token }}
