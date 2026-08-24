@@ -186,3 +186,72 @@ def test_backfill_merge_inserts_interior_dates_and_never_overwrites():
     assert n == 2
     assert series == [["2026-08-18", 1.0], ["2026-08-19", 2.0],
                       ["2026-08-20", 3.0], ["2026-08-21", 4.0]]
+
+
+# ── Plausibility: a feed we read WRONGLY, not one we cannot read ─────────────
+#
+# MIN_SCHEMES catches an unparseable file. These catch a parseable one whose
+# numbers come off the wrong column — 14,000 valid-looking floats that would
+# sail past every other guard here.
+
+def _store(n, nav=100.0):
+    return {"schemes": {str(i): [["2026-08-20", nav]] for i in range(n)}}
+
+
+def _run(monkeypatch, daily, blob):
+    """main() with the feed stubbed and the store in memory."""
+    monkeypatch.setattr(nightly, "parse_navall", lambda _t: daily)
+    monkeypatch.setattr(nightly, "fetch_navall", lambda: "")
+    monkeypatch.setattr(store, "download", lambda repo: (pathlib.Path("."), blob))
+    published = {}
+    monkeypatch.setattr(store, "publish",
+                        lambda w, b, r, **kw: published.update(kw) or "2026-08-21")
+    nightly.main()
+    return published
+
+
+def test_a_column_swap_that_still_parses_is_caught(monkeypatch):
+    """The residual risk after the header fix: every row parses, but the NAVs
+    are somebody else's numbers. Every scheme moves at once."""
+    blob = _store(6000)
+    daily = {str(i): ("2026-08-21", 4321.0) for i in range(6000)}
+    with pytest.raises(SystemExit, match="wrong column"):
+        _run(monkeypatch, daily, blob)
+    # and nothing was written
+    assert all(len(s) == 1 for s in blob["schemes"].values())
+
+
+def test_a_normal_day_passes(monkeypatch):
+    blob = _store(6000)
+    daily = {str(i): ("2026-08-21", 100.0 + (i % 7) * 0.3) for i in range(6000)}
+    assert _run(monkeypatch, daily, blob)["appended"] == 6000
+
+
+def test_genuine_redenominations_are_kept_not_rejected(monkeypatch):
+    """2013-04-22: a wave of face-value changes, ~9,900% each, all real. The
+    worst real day on record was 1.21% of schemes — under the ceiling."""
+    blob = _store(6000)
+    daily = {str(i): ("2026-08-21", 100.3) for i in range(6000)}
+    for i in range(60):                              # 1.0%, like the real day
+        daily[str(i)] = ("2026-08-21", 10030.0)      # x100 redenomination
+    assert _run(monkeypatch, daily, blob)["appended"] == 6000
+    assert blob["schemes"]["0"][-1] == ["2026-08-21", 10030.0]
+
+
+def test_the_ceiling_sits_above_the_worst_real_day_and_below_a_swap():
+    assert nightly.MAX_IMPLAUSIBLE > 0.0121          # 2013-04-22
+    assert nightly.MAX_IMPLAUSIBLE < 0.50            # any systemic mis-read
+
+
+def test_a_tiny_append_is_not_judged_on_its_ratio(monkeypatch):
+    """A full feed, but the store is already current for all but three schemes
+    — one of which split. That is a 33% breach rate on a sample of 3, which
+    means nothing. The ratio must not fire here."""
+    blob = _store(6000)
+    for i in range(3, 6000):                      # already have 2026-08-21
+        blob["schemes"][str(i)] = [["2026-08-21", 100.0]]
+    daily = {str(i): ("2026-08-21", 100.1) for i in range(6000)}
+    daily["0"] = ("2026-08-21", 10000.0)          # a genuine redenomination
+    published = _run(monkeypatch, daily, blob)
+    assert published["appended"] == 3
+    assert blob["schemes"]["0"][-1] == ["2026-08-21", 10000.0]

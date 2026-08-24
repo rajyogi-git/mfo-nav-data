@@ -34,6 +34,26 @@ NAVALL = "https://www.amfiindia.com/spages/NAVAll.txt"
 # that is a format change or a truncated download, not a quiet market day.
 MIN_SCHEMES = 5000
 
+# Plausibility floor for the appended NAVs themselves. MIN_SCHEMES catches a
+# feed we cannot READ; this catches one we read wrongly — a column swap that
+# still parses cleanly and hands us 14,000 valid-looking numbers off the wrong
+# field. Fatal-on-zero would never fire on that.
+#
+# Calibrated against the store's own history: 6,674,277 consecutive-day
+# observations, of which 0.0019% move more than 50% in a day, and the worst
+# single day on record had 1.21% of schemes breach (2013-04-22 — a wave of
+# face-value redenominations, ~9,900% each, all genuine).
+#
+# So the trip is the SHARE of appends that look wrong, not any one fund. Big
+# single-day moves in this data are overwhelmingly real: splits and
+# redenominations. Rejecting them individually would discard true NAVs and
+# freeze those schemes silently — the same failure this pipeline just spent a
+# week demonstrating. A mis-read column, by contrast, breaks nearly every row
+# at once, so it clears 2% by a mile while the worst real day never has.
+IMPLAUSIBLE_MOVE  = 0.50    # |1-day change| beyond this is worth counting
+MAX_IMPLAUSIBLE   = 0.02    # ...and beyond this share of appends, we stop
+MIN_SAMPLE        = 100     # below this, the share is too noisy to judge on
+
 
 def fetch_navall():
     return navfeed.fetch_text(NAVALL, "AMFI NAVAll.txt")
@@ -64,7 +84,10 @@ def main():
     work, blob = store.download(REPO)
     schemes = blob["schemes"]
 
-    appended = skipped = 0
+    # Decide everything before mutating anything: the plausibility check below
+    # has to be able to abort without having half-written the store.
+    proposed = []                       # (code, series, [date, nav], pct_move)
+    skipped = 0
     for code, series in schemes.items():
         row = daily.get(code)
         if not row:
@@ -73,8 +96,31 @@ def main():
         if series and series[-1][0] >= d:
             skipped += 1
             continue
-        series.append([d, nav])
-        appended += 1
+        prev = series[-1][1] if series else None
+        move = abs(nav - prev) / prev if prev else 0.0
+        proposed.append((code, series, [d, nav], move))
+
+    odd = [p for p in proposed if p[3] > IMPLAUSIBLE_MOVE]
+    if len(proposed) >= MIN_SAMPLE and len(odd) > MAX_IMPLAUSIBLE * len(proposed):
+        worst = sorted(odd, key=lambda p: -p[3])[:5]
+        detail = "; ".join(
+            f"{c} {s[-1][1]:g}->{r[1]:g} ({m*100:.0f}%)" for c, s, r, m in worst)
+        raise SystemExit(
+            f"{len(odd)} of {len(proposed)} appends ({100*len(odd)/len(proposed):.1f}%) "
+            f"move more than {IMPLAUSIBLE_MOVE*100:.0f}% in a day, over the "
+            f"{MAX_IMPLAUSIBLE*100:.0f}% ceiling. The worst real day on record was "
+            f"1.21%, so this reads as NAVs taken off the wrong column rather than "
+            f"a market event. Nothing was written. Worst: {detail}")
+
+    for _code, series, row, _move in proposed:
+        series.append(row)
+    appended = len(proposed)
+
+    # Individually large but not systemic: real splits and redenominations look
+    # like this. Named in the log so a human can eyeball them, not rejected.
+    for c, ser, r, m in sorted(odd, key=lambda p: -p[3]):
+        print(f"  note: {c} moved {m*100:.0f}% "
+              f"({ser[-2][1]:g} -> {r[1]:g}) — split/redenomination?")
 
     if appended == 0:
         # Genuinely nothing new. Distinguishable from the failure above because
