@@ -29,3 +29,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python scripts/nightly.py
+
+  # GitHub disables scheduled workflows after 60 days with no commits, and this
+  # repo ships data as release assets, so it never commits on its own (warning
+  # email, 17 Oct 2026). Re-enabling the already-enabled workflow each run
+  # resets that clock without adding commits. Separate job: it needs only
+  # actions:write, and a failure here can never block the NAV append.
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      actions: write
+    steps:
+      - name: Keep the schedule from being auto-disabled
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/nightly.yml/enable"
