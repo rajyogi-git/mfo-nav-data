@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import navfeed
 import store
+import tri
 
 REPO   = os.environ.get("GITHUB_REPOSITORY", store.REPO_DEFAULT)
 NAVALL = "https://www.amfiindia.com/spages/NAVAll.txt"
@@ -122,14 +123,23 @@ def main():
         print(f"  note: {c} moved {m*100:.0f}% "
               f"({ser[-2][1]:g} -> {r[1]:g}) — split/redenomination?")
 
-    if appended == 0:
+    # Nifty TRIs ride along (scripts/tri.py). A failure there is printed and
+    # the NAVs publish regardless; the site falls back to its index fund.
+    try:
+        tri_added = tri.top_up(blob)
+        print(f"tri: +{tri_added} rows")
+    except Exception as exc:                               # noqa: BLE001
+        tri_added = 0
+        print(f"  WARNING tri top-up failed, NAVs unaffected: {exc}")
+
+    if appended == 0 and tri_added == 0:
         # Genuinely nothing new. Distinguishable from the failure above because
         # we know the file parsed: say so, so the log proves which case it was.
         print(f"no-op: read {len(daily)} schemes from AMFI, none newer than "
               f"the store's {len(schemes)} (weekend/holiday?)")
         return
 
-    as_of = store.publish(work, blob, REPO, appended=appended)
+    as_of = store.publish(work, blob, REPO, appended=appended, tri_appended=tri_added)
     print(f"appended {appended} schemes ({skipped} already current); "
           f"as_of now {as_of}")
 
